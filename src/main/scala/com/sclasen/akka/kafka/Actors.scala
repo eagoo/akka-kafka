@@ -71,6 +71,9 @@ class ConnectorFSM[Key, Msg](props: AkkaConsumerProps[Key, Msg], connector: Cons
   import props._
   import context.dispatcher
 
+  /*
+   * start with Stopped , cnt 0 of ConnectorState[Committing|Receiving|Stopped]
+   */
   startWith(Stopped, 0)
 
   var commitTimeoutCancellable: Option[Cancellable] = None
