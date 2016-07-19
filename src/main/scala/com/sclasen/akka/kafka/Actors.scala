@@ -10,29 +10,29 @@ import kafka.message.MessageAndMetadata
 
 object ConnectorFSM {
 
-  sealed trait ConnectorState
+  sealed trait ConnectorState //连接状态
 
-  case object Committing extends ConnectorState
+  case object Committing extends ConnectorState //提交
 
-  case object Receiving extends ConnectorState
+  case object Receiving extends ConnectorState //接收
 
-  case object Stopped extends ConnectorState
+  case object Stopped extends ConnectorState //停止
 
-  sealed trait ConnectorProtocol
+  sealed trait ConnectorProtocol  //连接协议
 
-  case object Start extends ConnectorProtocol
+  case object Start extends ConnectorProtocol //开始
 
-  case class Drained(stream: String) extends ConnectorProtocol
+  case class Drained(stream: String) extends ConnectorProtocol //耗尽
 
-  case object Received extends ConnectorProtocol
+  case object Received extends ConnectorProtocol //接收到
 
-  case object Commit extends ConnectorProtocol
+  case object Commit extends ConnectorProtocol //提交
 
-  case object Started extends ConnectorProtocol
+  case object Started extends ConnectorProtocol //已开始
 
-  case object Committed extends ConnectorProtocol
+  case object Committed extends ConnectorProtocol //已提交
 
-  case object Stop extends ConnectorProtocol
+  case object Stop extends ConnectorProtocol //停止
 
 }
 
@@ -54,9 +54,9 @@ object StreamFSM {
 
   sealed trait StreamProtocol
 
-  case object StartProcessing extends StreamProtocol
+  case object StartProcessing extends StreamProtocol //开始处理消息
 
-  case object Drain extends StreamProtocol
+  case object Drain extends StreamProtocol //已消耗消息
 
   case object Processed extends StreamProtocol
 
@@ -79,7 +79,7 @@ class ConnectorFSM[Key, Msg](props: AkkaConsumerProps[Key, Msg], connector: Cons
   var commitTimeoutCancellable: Option[Cancellable] = None
   var committer: Option[ActorRef] = None
 
-  def scheduleCommit = {
+  def scheduleCommit = { //延迟
     commitTimeoutCancellable = commitConfig.commitInterval.map(i => context.system.scheduler.scheduleOnce(i, self, Commit))
   }
 
@@ -99,13 +99,14 @@ class ConnectorFSM[Key, Msg](props: AkkaConsumerProps[Key, Msg], connector: Cons
         }
       }
 
+      // 根据构建参数启动topicFilter or startTopic
       topicFilterOrTopic.fold(startTopicFilter, startTopic)
 
       log.info("at=created-streams")
-      context.children.foreach(_ ! Continue)
+      context.children.foreach(_ ! Continue)  //发送 Continue 指令 给 StreamFSM children
       scheduleCommit
-      sender ! Started
-      goto(Receiving) using 0
+      sender ! Started  //已开始 好像没什么用
+      goto(Receiving) using 0 //跳转到接收状态
   }
 
   when(Receiving) {
@@ -118,8 +119,8 @@ class ConnectorFSM[Key, Msg](props: AkkaConsumerProps[Key, Msg], connector: Cons
     case Event(Commit, uncommitted) =>
       debugRec(Commit, uncommitted)
       committer = Some(sender)
-      goto(Committing) using 0
-    case Event(Committed, uncommitted) =>
+      goto(Committing) using 0  // 转到Committing状态
+    case Event(Committed, uncommitted) => //收到已提交Committed 消息
       debugRec(Committed, uncommitted)
       stay()
     case Event(d@Drained(s), uncommitted) =>
@@ -130,20 +131,20 @@ class ConnectorFSM[Key, Msg](props: AkkaConsumerProps[Key, Msg], connector: Cons
   onTransition {
     case Receiving -> Committing =>
       log.info("at=transition from={} to={} uncommitted={}", Receiving, Committing, stateData)
-      commitTimeoutCancellable.foreach(_.cancel())
-      context.children.foreach(_ ! Drain)
+      commitTimeoutCancellable.foreach(_.cancel())  //停止commitTimeout
+      context.children.foreach(_ ! Drain) //向StreamFSM 发送Drain消息
   }
 
   onTransition {
     case Committing -> Receiving =>
       log.info("at=transition from={} to={}", Committing, Receiving)
-      scheduleCommit
-      committer.foreach(_ ! Committed)
+      scheduleCommit //设置间隔发送Commit消息
+      committer.foreach(_ ! Committed) //好像也没什么作用
       committer = None
-      context.children.foreach(_ ! StartProcessing)
+      context.children.foreach(_ ! StartProcessing) //向StreamFSM 发送StartProcessing消息
   }
 
-  when(Committing, stateTimeout = 1 seconds) {
+  when(Committing, stateTimeout = 1 seconds) { //提交offsets中
     case Event(Received, drained) =>
       debugCommit(Received, "stream", drained)
       stay()
@@ -179,7 +180,7 @@ class ConnectorFSM[Key, Msg](props: AkkaConsumerProps[Key, Msg], connector: Cons
 class StreamFSM[Key, Msg](stream: KafkaStream[Key, Msg], maxOutstanding: Int, receiver: ActorRef, msgHandler: (MessageAndMetadata[Key,Msg]) => Any) extends Actor with FSM[StreamState, Int] {
 
   lazy val msgIterator = stream.iterator()
-  val conn = context.parent
+  val conn = context.parent //父节点是ConnectorFSM
 
   def hasNext() = try {
     msgIterator.hasNext()
@@ -187,6 +188,7 @@ class StreamFSM[Key, Msg](stream: KafkaStream[Key, Msg], maxOutstanding: Int, re
     case cte: ConsumerTimeoutException => false
   }
 
+  //初始Processing 状态
   startWith(Processing, 0)
 
   when(Processing) {
@@ -216,7 +218,7 @@ class StreamFSM[Key, Msg](stream: KafkaStream[Key, Msg], maxOutstanding: Int, re
       self ! Continue
       stay using (outstanding - 1)
     /* conn says drain, we have no outstanding */
-    case Event(Drain, outstanding) if outstanding == 0 =>
+    case Event(Drain, outstanding) if outstanding == 0 => //未完成数量为0时
       debug(Processing, Drain, outstanding)
       goto(Empty)
     /* conn says drain, we have outstanding */
@@ -281,7 +283,7 @@ class StreamFSM[Key, Msg](stream: KafkaStream[Key, Msg], maxOutstanding: Int, re
 
   when(Empty) {
     /* conn says go */
-    case Event(StartProcessing, outstanding) =>
+    case Event(StartProcessing, outstanding) => //收到开始处理消息
       debug(Unused, Drain, outstanding)
       goto(Processing) using 0
     case Event(Continue, outstanding) =>
@@ -325,7 +327,7 @@ class StreamFSM[Key, Msg](stream: KafkaStream[Key, Msg], maxOutstanding: Int, re
   onTransition {
     case _ -> Empty =>
       log.debug("stream={} at=Drained", me)
-      conn ! Drained(me)
+      conn ! Drained(me) //到Empty状态时，向conn发送Drained
   }
 
   onTransition(handler _)
